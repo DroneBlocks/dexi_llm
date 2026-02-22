@@ -1,0 +1,11 @@
+# Model files (too large for git)
+*.gguf
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# OS
+.DS_Store
