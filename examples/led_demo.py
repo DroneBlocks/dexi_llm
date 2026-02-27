@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Test the dexi_llm node by sending prompts via the LLMChat service.
+"""LED demo — cycles through colors and effects via the on-device LLM.
+
+Each prompt is interpreted by the fine-tuned Llama model running on the Pi,
+which translates natural language into the correct ROS 2 service call.
 
 Usage:
-    # Single prompt
-    python3 test_llm_chat.py make the led green
+    # Run full demo (colors + effects)
+    python3 led_demo.py
 
-    # Rainbow sequence (no args)
-    python3 test_llm_chat.py
+    # Single prompt
+    python3 led_demo.py make the led green
 """
 
 import sys
@@ -60,7 +63,7 @@ def call_llm(node, client, prompt: str) -> None:
 
 def main():
     rclpy.init()
-    node = Node("llm_test_client")
+    node = Node("led_demo_client")
     client = node.create_client(LLMChat, "/dexi/llm/llm_node/chat")
 
     print("Waiting for LLM service...")
