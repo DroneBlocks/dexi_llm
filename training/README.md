@@ -16,6 +16,9 @@ Small instruct models (1-3B) support tool calling but are unreliable at this sca
 
 ## Quick Start (Local NVIDIA GPU)
 
+> **Windows users:** Unsloth and CUDA training do **not** work natively on Windows.
+> You must use **WSL 2** (Windows Subsystem for Linux). See [Windows (WSL 2)](#windows-wsl-2) below before proceeding.
+
 ### 1. Set up venv
 
 ```bash
@@ -77,6 +80,55 @@ If you don't have a local NVIDIA GPU, use the Colab notebook (Qwen 2.5 only):
    - From `dexi_llm/config/`: `tools.json`, `system_prompt.txt`, `models.json`
 3. Run all cells (~20-30 min)
 4. Download the GGUF file and deploy as above
+
+## Windows (WSL 2)
+
+Unsloth requires a Linux environment with native CUDA support. On Windows, use WSL 2 — your host NVIDIA GPU is automatically passed through.
+
+### Prerequisites
+
+1. **NVIDIA GPU driver** installed on Windows (the host driver is shared with WSL — do **not** install a separate Linux driver)
+2. **WSL 2** enabled:
+   ```powershell
+   wsl --install -d Ubuntu-24.04
+   ```
+3. Verify GPU access inside WSL:
+   ```bash
+   nvidia-smi
+   ```
+   You should see your GPU listed. If not, update your NVIDIA driver and ensure WSL 2 (not WSL 1) is active.
+
+### Setup inside WSL
+
+```bash
+# Install Python and venv
+sudo apt update && sudo apt install -y python3 python3-venv python3-pip
+
+# Clone or navigate to the repo (use /mnt/c/ to access Windows files,
+# but training is faster on the native Linux filesystem)
+git clone <your-repo-url> ~/dexi-sim-ftw
+cd ~/dexi-sim-ftw/dexi_ws/src/dexi_llm
+
+# Create venv and install dependencies
+python3 -m venv venv
+source venv/bin/activate
+pip install -r training/requirements.txt
+
+# Train
+python training/train_local.py
+```
+
+> **Tip:** Training on the Linux filesystem (`~/`) is significantly faster than on `/mnt/c/` due to filesystem overhead. Clone the repo inside WSL for best performance, then copy the GGUF output back to Windows or directly to the Pi.
+
+### Copy GGUF out of WSL
+
+```bash
+# From WSL to Windows
+cp dexi-qwen2.5-1.5b-gguf/*.gguf /mnt/c/Users/<you>/dexi-qwen2.5-1.5b-q4_k_m.gguf
+
+# Or directly to Pi
+scp dexi-qwen2.5-1.5b-gguf/*.gguf dexi@192.168.68.59:~/dexi_ws/src/dexi_llm/models/
+```
 
 ## Directory Structure
 

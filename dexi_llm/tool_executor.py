@@ -114,6 +114,21 @@ class ToolExecutor:
                     f"Tool result ({tc_name}): {tool_result[:200]}"
                 )
 
+            # For single-tool, single-intent calls: if the tool succeeded,
+            # stop the loop and use the assistant's text as the response.
+            # Multi-step commands (like takeoff) produce no leading text
+            # before the tool_call — the model just emits <tool_call> directly.
+            # Single-intent commands produce a natural language prefix
+            # (e.g. "Setting LEDs to green.\n\n<tool_call>...").
+            text_before_tool = output_text[:output_text.find("<tool_call>")].strip()
+            all_succeeded = all(
+                '"success": true' in r or '"success":true' in r
+                for _, _, r in tool_results
+            )
+            if len(tool_calls) == 1 and text_before_tool and all_succeeded:
+                result.response = text_before_tool
+                return result
+
             # Append the assistant output + tool results to the prompt
             prompt += output_text
             # Close the assistant turn if needed

@@ -24,12 +24,82 @@ import argparse
 import glob
 import json
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
+
+# Disable torch dynamo compilation — avoids nvcc permission errors in WSL
+# and environments without the full CUDA toolkit installed.
+os.environ["TORCHDYNAMO_DISABLE"] = "1"
 
 TRAINING_DIR = Path(__file__).parent
 CONFIG_DIR = TRAINING_DIR.parent / "dexi_llm" / "config"
 DATASET_DIR = TRAINING_DIR / "dataset"
+
+
+def _manual_gguf_export(merged_dir, gguf_dir, gguf_name):
+    """Fallback GGUF export using llama.cpp CLI tools.
+
+    Clones and builds llama.cpp if needed, then converts the merged HF model
+    to GGUF bf16 and quantizes to Q4_K_M.
+    """
+    script_dir = Path(__file__).parent.parent
+    llama_cpp_dir = script_dir / "llama.cpp"
+
+    # Clone llama.cpp if missing
+    if not llama_cpp_dir.exists():
+        print("  Cloning llama.cpp...")
+        subprocess.run(
+            ["git", "clone", "--depth", "1",
+             "https://github.com/ggml-org/llama.cpp.git", str(llama_cpp_dir)],
+            check=True, capture_output=True,
+        )
+
+    # Build llama-quantize if missing
+    quantize_bin = llama_cpp_dir / "build" / "bin" / "llama-quantize"
+    if not quantize_bin.exists():
+        print("  Building llama.cpp (llama-quantize)...")
+        build_dir = llama_cpp_dir / "build"
+        subprocess.run(
+            ["cmake", "-B", str(build_dir), "-DGGML_CUDA=OFF"],
+            cwd=str(llama_cpp_dir), check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["cmake", "--build", str(build_dir), "--target", "llama-quantize",
+             "-j" + str(os.cpu_count() or 4)],
+            cwd=str(llama_cpp_dir), check=True, capture_output=True,
+        )
+
+    converter = llama_cpp_dir / "convert_hf_to_gguf.py"
+    if not converter.exists():
+        print(f"  ERROR: {converter} not found")
+        return None
+
+    os.makedirs(gguf_dir, exist_ok=True)
+    bf16_path = os.path.join(gguf_dir, gguf_name.replace("-q4_k_m", "-bf16"))
+    q4_path = os.path.join(gguf_dir, gguf_name)
+
+    # Convert HF → GGUF bf16
+    print(f"  Converting to GGUF bf16...")
+    subprocess.run(
+        [sys.executable, str(converter), str(merged_dir),
+         "--outfile", bf16_path, "--outtype", "bf16"],
+        check=True,
+    )
+
+    # Quantize bf16 → Q4_K_M
+    print(f"  Quantizing to Q4_K_M...")
+    subprocess.run(
+        [str(quantize_bin), bf16_path, q4_path, "Q4_K_M"],
+        check=True,
+    )
+
+    # Clean up bf16 intermediate
+    if os.path.exists(q4_path) and os.path.exists(bf16_path):
+        os.remove(bf16_path)
+
+    return q4_path if os.path.exists(q4_path) else None
 
 
 def main():
@@ -267,40 +337,56 @@ def main():
         print("\nExporting to GGUF...")
         merged_dir = MODEL_CONFIG["training"]["merged_dir"]
         gguf_dir = MODEL_CONFIG["training"]["gguf_dir"]
+        gguf_name = MODEL_CONFIG["gguf_name"]
+        models_dir = TRAINING_DIR.parent / "models"
 
         print(f"  Merging LoRA weights to {merged_dir}...")
         model.save_pretrained_merged(merged_dir, tokenizer)
 
-        print(f"  Exporting to GGUF (Q4_K_M) in {gguf_dir}...")
-        model.save_pretrained_gguf(
-            gguf_dir,
-            tokenizer,
-            quantization_method="q4_k_m",
-        )
+        # Try Unsloth's built-in GGUF export first, fall back to manual conversion
+        gguf_path = None
+        try:
+            print(f"  Exporting to GGUF (Q4_K_M) via Unsloth...")
+            model.save_pretrained_gguf(
+                gguf_dir,
+                tokenizer,
+                quantization_method="q4_k_m",
+            )
+            # Find the exported GGUF
+            for d in [gguf_dir, f"{gguf_dir}_gguf"]:
+                found = glob.glob(f"{d}/*.gguf")
+                q4_files = [f for f in found if "q4_k_m" in f.lower()]
+                if q4_files:
+                    gguf_path = q4_files[0]
+                    break
+                elif found:
+                    gguf_path = sorted(found, key=os.path.getsize)[-1]
+                    break
+        except Exception as e:
+            print(f"  Unsloth GGUF export failed: {e}")
+            print(f"  Falling back to manual conversion via llama.cpp...")
 
-        search_dirs = [gguf_dir, f"{gguf_dir}_gguf"]
-        gguf_files = []
-        for d in search_dirs:
-            found = glob.glob(f"{d}/*.gguf")
-            if found:
-                print(f"\n  Found .gguf files in {d}/:")
-                for fp in found:
-                    size_mb = os.path.getsize(fp) / (1024 * 1024)
-                    print(f"    {os.path.basename(fp)} ({size_mb:.0f} MB)")
-                gguf_files.extend(found)
+        # Manual fallback: convert_hf_to_gguf.py + llama-quantize
+        if gguf_path is None:
+            gguf_path = _manual_gguf_export(merged_dir, gguf_dir, gguf_name)
 
-        gguf_files = sorted(gguf_files, key=os.path.getsize, reverse=True)
-        if gguf_files:
-            gguf_path = gguf_files[0]
+        if gguf_path and os.path.exists(gguf_path):
             size_mb = os.path.getsize(gguf_path) / (1024 * 1024)
-            gguf_name = MODEL_CONFIG["gguf_name"]
-            print(f"\nGGUF ready: {gguf_path} ({size_mb:.0f} MB)")
-            print(f"\nDeploy:")
-            print(f"  cp {gguf_path} dexi_ws/src/dexi_llm/models/{gguf_name}")
-            print(f"  # Or SCP to Pi:")
-            print(f"  scp {gguf_path} dexi@192.168.68.59:~/dexi_ws/src/dexi_llm/models/{gguf_name}")
+            print(f"\n  GGUF ready: {gguf_path} ({size_mb:.0f} MB)")
+
+            # Auto-copy to models/ directory
+            os.makedirs(models_dir, exist_ok=True)
+            dest = models_dir / gguf_name
+            shutil.copy2(gguf_path, dest)
+            print(f"  Copied to {dest}")
+
+            print(f"\n  Deploy to Pi:")
+            print(f"  scp {dest} dexi@192.168.68.59:~/dexi_ws/src/dexi_llm/models/{gguf_name}")
         else:
-            print(f"\nERROR: No .gguf files found in {search_dirs}")
+            print(f"\nERROR: GGUF conversion failed. Merged model saved at {merged_dir}")
+            print(f"  You can manually convert with:")
+            print(f"  python llama.cpp/convert_hf_to_gguf.py {merged_dir} --outfile {gguf_name} --outtype bf16")
+            print(f"  llama-quantize {gguf_name} {gguf_name.replace('.gguf', '')}-q4.gguf Q4_K_M")
             sys.exit(1)
 
     print("\nDone!")
