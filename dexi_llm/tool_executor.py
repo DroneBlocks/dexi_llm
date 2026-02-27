@@ -15,8 +15,8 @@ from rclpy.node import Node
 from .ros_tools import RosTools, TOOL_DEFINITIONS
 from .config import load_system_prompt, load_model_config, build_system_block
 
-MAX_ITERATIONS = 5
-MAX_TOOL_RESULT_CHARS = 2000
+MAX_ITERATIONS = 3
+MAX_TOOL_RESULT_CHARS = 500
 
 # Regex to extract tool calls: <tool_call>{"name": "...", "arguments": {...}}</tool_call>
 _TOOL_CALL_RE = re.compile(
@@ -68,6 +68,8 @@ class ToolExecutor:
     def run(self, user_prompt: str) -> AgenticResult:
         """Execute the agentic loop and return the final result."""
         result = AgenticResult()
+        failed_services = set()
+        completed_subscriptions = set()  # topics already read
 
         # Build initial prompt with model-specific chat template
         prompt = self._build_initial_prompt(user_prompt)
@@ -96,9 +98,45 @@ class ToolExecutor:
 
             # Execute each tool call and collect results
             tool_results = []
+            action_succeeded = False
+            action_failed_permanently = False
+
             for tc_name, tc_args in tool_calls:
-                self._logger.info(f"Tool call: {tc_name}({json.dumps(tc_args)})")
-                tool_result = self._tools.execute(tc_name, tc_args)
+                # Skip topics we already subscribed to
+                if tc_name == "subscribe_once":
+                    topic = tc_args.get("topic", "")
+                    if topic in completed_subscriptions:
+                        self._logger.info(
+                            f"Skipping duplicate subscribe: {topic}")
+                        continue
+                # Skip services we already know are unavailable
+                if tc_name == "call_service":
+                    svc = tc_args.get("service", "")
+                    if svc in failed_services:
+                        self._logger.info(
+                            f"Skipping already-failed service: {svc}")
+                        tool_result = json.dumps({
+                            "error": f"Service {svc} is not available."
+                        })
+                        action_failed_permanently = True
+                    else:
+                        self._logger.info(
+                            f"Tool call: {tc_name}({json.dumps(tc_args)})")
+                        tool_result = self._tools.execute(tc_name, tc_args)
+
+                        # Track failed services
+                        if "not available" in tool_result or "timed out" in tool_result.lower():
+                            failed_services.add(svc)
+                            action_failed_permanently = True
+                        elif '"success": true' in tool_result or '"success":true' in tool_result:
+                            action_succeeded = True
+                else:
+                    self._logger.info(
+                        f"Tool call: {tc_name}({json.dumps(tc_args)})")
+                    tool_result = self._tools.execute(tc_name, tc_args)
+                    # Track successful subscriptions
+                    if tc_name == "subscribe_once" and "error" not in tool_result.lower():
+                        completed_subscriptions.add(tc_args.get("topic", ""))
 
                 # Truncate long results
                 if len(tool_result) > MAX_TOOL_RESULT_CHARS:
@@ -116,10 +154,6 @@ class ToolExecutor:
 
             # For single-tool, single-intent calls: if the tool succeeded,
             # stop the loop and use the assistant's text as the response.
-            # Multi-step commands (like takeoff) produce no leading text
-            # before the tool_call — the model just emits <tool_call> directly.
-            # Single-intent commands produce a natural language prefix
-            # (e.g. "Setting LEDs to green.\n\n<tool_call>...").
             text_before_tool = output_text[:output_text.find("<tool_call>")].strip()
             all_succeeded = all(
                 '"success": true' in r or '"success":true' in r
@@ -127,6 +161,20 @@ class ToolExecutor:
             )
             if len(tool_calls) == 1 and text_before_tool and all_succeeded:
                 result.response = text_before_tool
+                return result
+
+            # For multi-tool calls where at least one action succeeded
+            if action_succeeded:
+                result.response = text_before_tool or "Done!"
+                return result
+
+            # If the service is permanently unavailable, report and stop
+            if action_failed_permanently and not any(
+                tc_name != "call_service" for tc_name, _ in tool_calls
+            ):
+                result.response = (
+                    "Sorry, that service isn't available right now."
+                )
                 return result
 
             # Append the assistant output + tool results to the prompt
@@ -169,7 +217,7 @@ class ToolExecutor:
         """Run a single llama.cpp completion."""
         output = self._model(
             prompt,
-            max_tokens=512,
+            max_tokens=256,
             temperature=0.1,
             stop=self._stop_tokens,
         )

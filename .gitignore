@@ -1,6 +1,14 @@
 # Model files (too large for git)
 *.gguf
 
+# MLX training artifacts
+training/mlx/data/
+training/mlx/adapters/
+training/mlx/export/
+
+# Virtual environment
+venv/
+
 # Python
 __pycache__/
 *.pyc

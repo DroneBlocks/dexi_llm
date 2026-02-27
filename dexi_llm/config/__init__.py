@@ -57,11 +57,8 @@ def build_system_block(system_prompt: str, tools: list[dict]) -> str:
     return (
         f"{system_prompt}\n\n"
         "# Tools\n\n"
-        "You may call one or more functions to assist with the user query.\n\n"
-        "You are provided with function signatures within <tools></tools> XML tags:\n"
         f"<tools>\n{tools_json}\n</tools>\n\n"
-        "For each function call, return a json object with function name and "
-        "arguments within <tool_call></tool_call> XML tags:\n"
+        "For each call return:\n"
         "<tool_call>\n"
         '{"name": <function-name>, "arguments": <args-json-object>}\n'
         "</tool_call>"
