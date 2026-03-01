@@ -22,8 +22,8 @@
         "box_mission": {"description": "Fly a box pattern", "parameter": "size in meters", "default": 1.0},
         "stop_mission": {"description": "Stop current mission", "parameter": null}
       },
-      "takeoff_sequence": ["start_offboard_heartbeat", "arm", "offboard_takeoff"],
-      "landing_sequence": ["land", "disarm", "stop_offboard_heartbeat"]
+      "takeoff_sequence": ["arm", "offboard_takeoff"],
+      "landing_sequence": ["land"]
     },
     "led_ring_color": {
       "service": "/dexi/led_service/set_led_ring_color",

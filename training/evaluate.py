@@ -76,12 +76,24 @@ def load_model_config(model_path):
 
 def parse_tool_call(text):
     """Extract the first tool_call from model output."""
+    # Try with closing tag first
     match = re.search(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", text, re.DOTALL)
+    # Fall back to tool_call without closing tag (model may hit stop token)
+    if not match:
+        match = re.search(r"<tool_call>\s*(\{.*\})", text, re.DOTALL)
     if not match:
         return None
+    raw = match.group(1)
     try:
-        return json.loads(match.group(1))
+        return json.loads(raw)
     except json.JSONDecodeError:
+        # Strip trailing extra braces (common with small models)
+        while raw.endswith("}"):
+            raw = raw[:-1]
+            try:
+                return json.loads(raw + "}")
+            except json.JSONDecodeError:
+                continue
         return None
 
 

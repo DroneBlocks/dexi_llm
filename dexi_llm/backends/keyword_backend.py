@@ -4,12 +4,6 @@ from .base import LLMBackend, InferenceResult
 # Patterns: (compiled_regex, command_name, response_template)
 # {v} is replaced with the matched value in the response template.
 _PATTERNS: list[tuple[re.Pattern, str, str]] = [
-    # Offboard lifecycle
-    (re.compile(r"\b(?:start|begin|enable)\b.*\bheartbeat\b", re.I),
-     "start_offboard_heartbeat", "Starting offboard heartbeat."),
-    (re.compile(r"\b(?:stop|end|disable)\b.*\bheartbeat\b", re.I),
-     "stop_offboard_heartbeat", "Stopping offboard heartbeat."),
-
     # Arm / disarm
     (re.compile(r"\barm\b(?!.*\bdisarm\b)", re.I),
      "arm", "Arming the drone."),

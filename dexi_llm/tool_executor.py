@@ -18,9 +18,16 @@ from .config import load_system_prompt, load_model_config, build_system_block
 MAX_ITERATIONS = 3
 MAX_TOOL_RESULT_CHARS = 500
 
-# Regex to extract tool calls: <tool_call>{"name": "...", "arguments": {...}}</tool_call>
+# Regex to extract tool calls — tries with closing tag first, then without
 _TOOL_CALL_RE = re.compile(
     r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL
+)
+_TOOL_CALL_RE_OPEN = re.compile(
+    r"<tool_call>\s*(\{.*\})", re.DOTALL
+)
+# Strip tool_call tags from response text
+_TOOL_CALL_STRIP_RE = re.compile(
+    r"\s*<tool_call>.*?(?:</tool_call>|$)", re.DOTALL
 )
 
 
@@ -93,7 +100,9 @@ class ToolExecutor:
 
             if not tool_calls:
                 # No tool calls — this is the final text response
-                result.response = output_text.strip()
+                # Strip any unparsed <tool_call> tags to avoid leaking XML
+                clean = _TOOL_CALL_STRIP_RE.sub("", output_text).strip()
+                result.response = clean
                 return result
 
             # Execute each tool call and collect results
@@ -226,16 +235,41 @@ class ToolExecutor:
     def _parse_tool_calls(self, text: str) -> list[tuple[str, dict]]:
         """Extract tool calls from model output.
 
+        Handles extra trailing braces and missing </tool_call> tags,
+        which are common with small fine-tuned models.
+
         Returns a list of (tool_name, arguments) tuples.
         """
         calls = []
-        for match in _TOOL_CALL_RE.finditer(text):
-            try:
-                data = json.loads(match.group(1))
+        # Try with closing tag first, fall back to open-ended
+        matches = list(_TOOL_CALL_RE.finditer(text))
+        if not matches:
+            matches = list(_TOOL_CALL_RE_OPEN.finditer(text))
+        for match in matches:
+            raw = match.group(1)
+            data = self._try_parse_json(raw)
+            if data is not None:
                 name = data.get("name", "")
                 arguments = data.get("arguments", {})
                 if name:
                     calls.append((name, arguments))
-            except json.JSONDecodeError:
-                self._logger.warn(f"Failed to parse tool call JSON: {match.group(1)}")
+            else:
+                self._logger.warn(
+                    f"Failed to parse tool call JSON: {raw[:200]}"
+                )
         return calls
+
+    @staticmethod
+    def _try_parse_json(raw: str) -> dict | None:
+        """Parse JSON, stripping extra trailing braces if needed."""
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            # Strip trailing extra braces (common with small models)
+            while raw.endswith("}"):
+                raw = raw[:-1]
+                try:
+                    return json.loads(raw + "}")
+                except json.JSONDecodeError:
+                    continue
+            return None
