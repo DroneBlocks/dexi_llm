@@ -16,7 +16,11 @@ from .ros_tools import RosTools, TOOL_DEFINITIONS
 from .config import load_system_prompt, load_model_config, build_system_block
 
 MAX_ITERATIONS = 3
-MAX_TOOL_RESULT_CHARS = 500
+MAX_TOOL_RESULT_CHARS = 2000
+
+# Query tools return data the user needs to see directly.
+# Action tools return success/failure and the model's preamble text suffices.
+QUERY_TOOLS = {"get_topics", "subscribe_once"}
 
 # Regex to extract tool calls — tries with closing tag first, then without
 _TOOL_CALL_RE = re.compile(
@@ -161,13 +165,23 @@ class ToolExecutor:
                     f"Tool result ({tc_name}): {tool_result[:200]}"
                 )
 
-            # For single-tool, single-intent calls: if the tool succeeded,
-            # stop the loop and use the assistant's text as the response.
+            # For single-tool, single-intent calls: decide based on tool type.
             text_before_tool = output_text[:output_text.find("<tool_call>")].strip()
             all_succeeded = all(
                 '"success": true' in r or '"success":true' in r
                 for _, _, r in tool_results
             )
+
+            # Query tools: return the tool result directly — don't ask the
+            # small model to summarize data (it loses information).
+            if len(tool_calls) == 1 and tool_calls[0][0] in QUERY_TOOLS:
+                tc_name, _, tc_result = tool_results[0]
+                if "error" not in tc_result.lower()[:50]:
+                    preamble = text_before_tool + "\n\n" if text_before_tool else ""
+                    result.response = preamble + tc_result
+                    return result
+
+            # Action tools: if succeeded, the model's preamble text suffices.
             if len(tool_calls) == 1 and text_before_tool and all_succeeded:
                 result.response = text_before_tool
                 return result
@@ -226,7 +240,7 @@ class ToolExecutor:
         """Run a single llama.cpp completion."""
         output = self._model(
             prompt,
-            max_tokens=256,
+            max_tokens=512,
             temperature=0.1,
             stop=self._stop_tokens,
         )
